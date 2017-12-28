@@ -3,9 +3,7 @@ package kafka_client;
 import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.common.TopicPartition;
 
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Properties;
+import java.util.*;
 
 /**
  * MultiConsumerSinglePartition
@@ -46,29 +44,45 @@ public class MultiConsumerSinglePartition {
 
     static class MyListener implements ConsumerRebalanceListener{
 
+        KafkaConsumer<String, String> consumer;
+        String name;
 
+        MyListener(KafkaConsumer<String, String> consumer, String name) {
+            this.consumer = consumer;
+            this.name = name;
+        }
 
         @Override
         public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+            Map<TopicPartition, OffsetAndMetadata> map = new HashMap<>();
+            for(TopicPartition partition : partitions){
+                System.out.println("revoke " + name + " from partition " + partition.partition());
+                System.out.println("commit partition " + partition.partition() + " offset " +consumer.position(partition));
+                map.put(partition, new OffsetAndMetadata(consumer.position(partition)));
+            }
+            consumer.commitSync(map);
         }
 
         @Override
         public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-
+            for(TopicPartition partition : partitions){
+                System.out.println("assign partition " + partition.partition() + " to " + name);
+            }
         }
     }
 
 
     public static void main(String[] args) {
         Properties props = new Properties();
-        props.put("bootstrap.servers", "10.20.0.139:9092");
-        props.put("group.id", "mcsp");
+        props.put("bootstrap.servers", "47.100.49.129:9092");
+        props.put("group.id", "mcsp2");
         props.put("enable.auto.commit", "false");
         props.put("auto.offset.reset", "earliest");
         props.put("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
         props.put("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
-        consumer.subscribe(Arrays.asList("muti_part"));
-        new Thread(new MyConsumer(consumer, "consumer2")).start();
+        String name = "consumer2";
+        consumer.subscribe(Arrays.asList("muti_part"), new MyListener(consumer, name));
+        new Thread(new MyConsumer(consumer, name)).start();
     }
 }

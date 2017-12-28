@@ -354,11 +354,128 @@ name = consumer2, partition = 1, offset = 7, key = null, value = g
 
 
 
-##### 扩展六：消费者组中的某些消费者异常断开又没有提交offset时，导致并发情况下rebalance后重复消费数据，添加ConsumerRebalanceListener
+##### 扩展六：消费者组中有新消费者加入又没有提交offset时，导致并发情况下rebalance后重复消费数据，添加ConsumerRebalanceListener
 
+```java
+public class MultiConsumerSinglePartition {
+    static class MyConsumer implements Runnable{
+        KafkaConsumer<String, String> consumer;
+        int buffer;
+        String name;
+
+        MyConsumer(KafkaConsumer<String, String> consumer, String name){
+            this.consumer = consumer;
+            this.buffer = 0;
+            this.name = name;
+        }
+
+        @Override
+        public void run() {
+            while (true){
+                ConsumerRecords<String, String> records = consumer.poll(100);
+                for(ConsumerRecord<String, String> record : records){
+                    System.out.printf("name = %s, partition = %d, offset = %d, key = %s, value = %s%n", name,
+                            record.partition(), record.offset(), record.key(), record.value());
+                    buffer ++;
+                }
+                if(buffer >= 5){
+                    consumer.commitSync();
+                    buffer = 0;
+                    System.out.println(name  + " commit");
+                }
+            }
+        }
+    }
+
+
+    static class MyListener implements ConsumerRebalanceListener{
+
+        KafkaConsumer<String, String> consumer;
+        String name;
+
+        MyListener(KafkaConsumer<String, String> consumer, String name) {
+            this.consumer = consumer;
+            this.name = name;
+        }
+
+        @Override
+        public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+            Map<TopicPartition, OffsetAndMetadata> map = new HashMap<>();
+            for(TopicPartition partition : partitions){
+                System.out.println("revoke " + name + " from partition " + partition.partition());
+                System.out.println("commit partition " + partition.partition() + " offset " +consumer.position(partition));
+                map.put(partition, new OffsetAndMetadata(consumer.position(partition)));
+            }
+            consumer.commitSync(map);
+        }
+
+        @Override
+        public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+            for(TopicPartition partition : partitions){
+                System.out.println("assign partition " + partition.partition() + " to " + name);
+            }
+        }
+    }
+
+
+    public static void main(String[] args) {
+        Properties props = new Properties();
+        props.put("bootstrap.servers", "47.100.49.129:9092");
+        props.put("group.id", "mcsp2");
+        props.put("enable.auto.commit", "false");
+        props.put("auto.offset.reset", "earliest");
+        props.put("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+        String name = "consumer2";
+        consumer.subscribe(Arrays.asList("muti_part"), new MyListener(consumer, name));
+        new Thread(new MyConsumer(consumer, name)).start();
+    }
+}
 ```
 
+程序说明
+
+自定义MyListener类实现ConsumerRebalanceListener接口，其中onPartitionsRevoked方法表示当某个分区从指定消费者移除时应该做的动作，这里实现为提交每个分区最新的offset值，以免rebalance完成之后消息重复消费
+
+首先启动一个消费者，在启动另一个消费者，第一个消费者输出如下：
+
+```java
+22:26:49,555 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Discovered coordinator 47.100.49.129:9092 (id: 2147483647 rack: null)
+22:26:49,565 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Revoking previously assigned partitions []
+22:26:49,565 [ Thread-1 ] [ INFO ]:336 - [Consumer clientId=consumer-1, groupId=mcsp2] (Re-)joining group
+assign partition 0 to consumer1
+assign partition 1 to consumer1
+22:26:49,645 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Successfully joined group with generation 3
+22:26:49,645 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Setting newly assigned partitions [muti_part-0, muti_part-1]
+name = consumer1, partition = 0, offset = 0, key = null, value = 2
+name = consumer1, partition = 1, offset = 0, key = null, value = 1
+name = consumer1, partition = 1, offset = 1, key = null, value = 3
+revoke consumer1 from partition 0
+commit partition 0 offset 1
+22:27:49,735 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Revoking previously assigned partitions [muti_part-0, muti_part-1]
+revoke consumer1 from partition 1
+commit partition 1 offset 2
+22:27:49,765 [ Thread-1 ] [ INFO ]:336 - [Consumer clientId=consumer-1, groupId=mcsp2] (Re-)joining group
+22:27:49,795 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Successfully joined group with generation 4
+assign partition 0 to consumer1
+22:27:49,795 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Setting newly assigned partitions [muti_part-0]
 ```
 
+可以看出，在没有启动第二个消费者之前，2个分区都被指派给了consumer1，consumer1读取了3条消息，并没有提交
 
+consumer2输出如下：
+
+```java
+22:27:48,488 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Discovered coordinator 47.100.49.129:9092 (id: 2147483647 rack: null)
+22:27:48,488 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Revoking previously assigned partitions []
+22:27:48,488 [ Thread-1 ] [ INFO ]:336 - [Consumer clientId=consumer-1, groupId=mcsp2] (Re-)joining group
+assign partition 1 to consumer2
+22:27:49,795 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Successfully joined group with generation 4
+22:27:49,795 [ Thread-1 ] [ INFO ]:341 - [Consumer clientId=consumer-1, groupId=mcsp2] Setting newly assigned partitions [muti_part-1]
+```
+
+可以看出，当consumer2启动时，kafka将所有分区收回再重新分配，收回触发了consumer1的listener接口提交最新的offset，因此consumer2不会重复读到数据
+
+> 注：此种方法只能用于有新的消费者加入组时使用，当消费者异常断开时，依然不会提交offset，若想要保证消费者断开时不会重复消费数据，则可以通过指定partition的方式监听，同时把offset保存起来，原则是不让kafka进行rebalance
 
